@@ -1,6 +1,6 @@
 local M = {}
 
-local function in_word()
+local function in_word(include_separator)
     local cursor = vim.api.nvim_win_get_cursor(0)
     local line = vim.api.nvim_buf_get_lines(0, cursor[1] - 1, cursor[1], false)[1]
 
@@ -22,6 +22,24 @@ local function in_word()
         end_column = end_column - 1
     end
 
+    if include_separator then
+        local function is_separator(character)
+            return character == "_" or character == "-"
+        end
+
+        local is_first_separator = is_separator(line:sub(start_column - 1, start_column - 1))
+
+        if is_first_separator then
+            start_column = start_column - 1
+        else
+            local is_last_separator = is_separator(line:sub(end_column + 1, end_column + 1))
+
+            if is_last_separator then
+                end_column = end_column + 1
+            end
+        end
+    end
+
     return {
         first_line = cursor[1],
         start_column = start_column,
@@ -33,12 +51,12 @@ end
 local bindings = {
     {
         name = "case",
-        modes = { "c" },
-        key = "p",
+        modes = { "i", "a" },
+        key = "g",
         visual_mode = "charwise",
         callback = function(mode, requested)
             if requested == "cursor" then
-                return in_word()
+                return in_word(mode == "a")
             elseif requested == "next" then
             elseif requested == "last" then
             elseif requested == "every" then
