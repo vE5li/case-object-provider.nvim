@@ -1,53 +1,5 @@
 local M = {}
 
-local function in_word(include_separator)
-    local cursor = vim.api.nvim_win_get_cursor(0)
-    local line = vim.api.nvim_buf_get_lines(0, cursor[1] - 1, cursor[1], false)[1]
-
-    local start_column = string.find(line:reverse(), "[^a-z0-9]", #line - cursor[2])
-    if start_column == nil then
-        start_column = 0
-    else
-        start_column = #line - start_column + 1
-
-        if string.match(line:sub(start_column, start_column), "[A-Z]") == nil then
-            start_column = start_column + 1
-        end
-    end
-
-    local end_column = string.find(line, "[^a-z0-9]", cursor[2] + 2)
-    if end_column == nil then
-        end_column = #line
-    else
-        end_column = end_column - 1
-    end
-
-    if include_separator then
-        local function is_separator(character)
-            return character == "_" or character == "-"
-        end
-
-        local is_first_separator = is_separator(line:sub(start_column - 1, start_column - 1))
-
-        if is_first_separator then
-            start_column = start_column - 1
-        else
-            local is_last_separator = is_separator(line:sub(end_column + 1, end_column + 1))
-
-            if is_last_separator then
-                end_column = end_column + 1
-            end
-        end
-    end
-
-    return {
-        first_line = cursor[1],
-        start_column = start_column,
-        last_line = cursor[1],
-        end_column = end_column,
-    }
-end
-
 local function add_word(objects, line, line_number, start_column, end_column, include_separator)
     local word = line:sub(start_column, end_column)
 
@@ -113,6 +65,7 @@ local function add_word(objects, line, line_number, start_column, end_column, in
 
         local word_end = end_column
         local waiting_for_uppercase = nil
+        local part_added = false
 
         while end_column >= start_column do
             local current_character = line:sub(end_column, end_column)
@@ -123,6 +76,11 @@ local function add_word(objects, line, line_number, start_column, end_column, in
                 if current_character:match("%u") then
                     -- We got an uppercase character and want to add this character and the tail to the objects.
 
+                    -- This check filters out words such as `Test` that don't consist of multiple parts.
+                    if end_column == start_column and not part_added then
+                        return
+                    end
+
                     table.insert(objects, {
                         first_line = line_number,
                         start_column = end_column,
@@ -132,6 +90,7 @@ local function add_word(objects, line, line_number, start_column, end_column, in
 
                     word_end = end_column - 1
                     waiting_for_uppercase = nil
+                    part_added = true
                 end
             elseif waiting_for_uppercase == false then
                 if current_character:match("%U") then
@@ -146,6 +105,7 @@ local function add_word(objects, line, line_number, start_column, end_column, in
 
                     word_end = end_column
                     waiting_for_uppercase = nil
+                    part_added = true
                 end
             end
 
@@ -161,6 +121,170 @@ local function add_word(objects, line, line_number, start_column, end_column, in
                 end_column = word_end,
             })
         end
+    end
+end
+
+local function find_closest(include_separator)
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+    local search_column = cursor[2] + 1
+    local down_line_number = cursor[1]
+    local up_line_number = cursor[1]
+
+    while down_line_number < #lines or up_line_number > 1 do
+        local down_line = lines[down_line_number]
+
+        if down_line then
+            local down_offset = 1
+            local start_column, end_column = down_line:find("[a-zA-Z0-9_-]+", down_offset)
+            local objects = {}
+
+            while start_column do
+                add_word(objects, down_line, down_line_number, start_column, end_column,
+                    include_separator)
+                down_offset = end_column + 1
+                start_column, end_column = down_line:find("[a-zA-Z0-9_-]+", down_offset)
+            end
+
+            -- If we found some objects, select the best one
+            if #objects > 0 then
+                local best_match
+                local best_distance
+
+                for object_index, object in ipairs(objects) do
+                    local distance = math.min(math.abs(object["start_column"] - (search_column or 1)),
+                        math.abs(object["end_column"] - (search_column or 1)) + 1)
+
+                    -- Best case: we have an object right under the cursor, so we instantly return that.
+                    if search_column and object["start_column"] <= search_column and object["end_column"] >= search_column then
+                        return object
+                    elseif not best_distance or distance < best_distance then
+                        best_match = object_index
+                        best_distance = distance
+                    end
+                end
+
+                if best_match then
+                    return objects[best_match]
+                end
+            end
+        end
+
+        local up_line = lines[up_line_number]
+
+        if up_line then
+            local up_offset = 1
+            local start_column, end_column = up_line:find("[a-zA-Z0-9_-]+", up_offset)
+            local objects = {}
+
+            while start_column do
+                add_word(objects, up_line, up_line_number, start_column, end_column, include_separator)
+                up_offset = end_column + 1
+                start_column, end_column = up_line:find("[a-zA-Z0-9_-]+", up_offset)
+            end
+
+            -- If we found some objects, select the best one
+            if #objects > 0 then
+                local best_match
+                local best_distance
+
+                for object_index, object in ipairs(objects) do
+                    local distance = (search_column or #up_line) - object["end_column"]
+
+                    if (not search_column or object["end_column"] < search_column) and (not best_distance or distance < best_distance) then
+                        best_match = object_index
+                        best_distance = distance
+                    end
+                end
+
+                if best_match then
+                    return objects[best_match]
+                end
+            end
+        end
+
+        search_column = nil
+        down_line_number = down_line_number + 1
+        up_line_number = up_line_number - 1
+    end
+end
+
+local function find_next(include_separator)
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local lines = vim.api.nvim_buf_get_lines(0, cursor[1] - 1, -1, false)
+    local search_column = cursor[2] + 1
+
+    for line_number, line in ipairs(lines) do
+        local offset = 1
+        local start_column, end_column = line:find("[a-zA-Z0-9_-]+", offset)
+        local objects = {}
+
+        while start_column do
+            add_word(objects, line, line_number + cursor[1] - 1, start_column, end_column, include_separator)
+            offset = end_column + 1
+            start_column, end_column = line:find("[a-zA-Z0-9_-]+", offset)
+        end
+
+        -- If we found some objects, select the best one
+        if #objects > 0 then
+            local best_match
+            local best_distance
+
+            for object_index, object in ipairs(objects) do
+                local distance = object["start_column"] - search_column
+
+                if object["start_column"] > search_column and (not best_distance or distance < best_distance) then
+                    best_match = object_index
+                    best_distance = distance
+                end
+            end
+
+            if best_match then
+                return objects[best_match]
+            end
+        end
+
+        search_column = 1
+    end
+end
+
+local function find_last(include_separator)
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local lines = vim.api.nvim_buf_get_lines(0, 0, cursor[1], false)
+    local search_column = cursor[2] + 1
+
+    for line_number = #lines, 1, -1 do
+        local line = lines[line_number]
+        local offset = 1
+        local start_column, end_column = line:find("[a-zA-Z0-9_-]+", offset)
+        local objects = {}
+
+        while start_column do
+            add_word(objects, line, line_number, start_column, end_column, include_separator)
+            offset = end_column + 1
+            start_column, end_column = line:find("[a-zA-Z0-9_-]+", offset)
+        end
+
+        -- If we found some objects, select the best one
+        if #objects > 0 then
+            local best_match
+            local best_distance
+
+            for object_index, object in ipairs(objects) do
+                local distance = (search_column or #line) - object["end_column"]
+
+                if (not search_column or object["end_column"] < search_column) and (not best_distance or distance < best_distance) then
+                    best_match = object_index
+                    best_distance = distance
+                end
+            end
+
+            if best_match then
+                return objects[best_match]
+            end
+        end
+
+        search_column = nil
     end
 end
 
@@ -189,11 +313,17 @@ local bindings = {
         key = "g",
         visual_mode = "charwise",
         callback = function(mode, requested)
-            if requested == "cursor" then
-                return in_word(mode == "a")
+            if requested == "closest" then
+                -- TODO: Filter out lines that are not on the screen
+                return find_closest(mode == "a")
             elseif requested == "next" then
+                -- TODO: Filter out lines that are not on the screen
+                return find_next(mode == "a")
             elseif requested == "last" then
+                -- TODO: Filter out lines that are not on the screen
+                return find_last(mode == "a")
             elseif requested == "every" then
+                -- TODO: Filter out lines that are not on the screen
                 return find_all(mode == "a")
             end
         end,
